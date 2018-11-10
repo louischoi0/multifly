@@ -4,6 +4,10 @@ import sys
 import matplotlib.pyplot as plt
 import evaluator
 from copy import deepcopy
+import sqlite3
+
+
+CONNECTION = sqlite3.connect("BIT3.db")
 
 CODES = ["BTC","EOS","ETC","BCH","XRP","ZRX","LTC"]
 CODES0 = ["BTC","EOS","ZRX","BCH"]
@@ -26,145 +30,68 @@ def MDD(series) :
 
     return mdd * -100
 
-class simulator :
-    def __init__(self,time_series,volume_series,valuator_instance) :
-        self.time_series = time_series
-        self.volume_series = volume_series
-        self.evaluator_instance = evaluator_instance
-        self.standard_value = 1000
-        self.position = 0
-        self.coin = 0
-        self.rdelta = 100
-        self.history = []
-        self.mdelta = 10
-        self.ventry = [0.]
+def get_max_up_point(series) :
+    p = series[0]
+    mud = 0
 
-    def rebalance(self,props,stime_series) :
-        idx, = np.where( self.position == 0 )
-        weights = stime_series.iloc[-1,idx].values / stime_series.iloc[-self.mdelta,idx].values
-        weights -= 1
+    in_loc = 0
+    out_loc = 0
 
-        if np.any( weights < 0 ) :
-            weights += np.abs(np.min(weights))
+    tmud = mud
+    res = [(0,0,0)]
 
-        if np.sum(weights) == 0 :
-            self.ventry[:] = 0
-            return
+    for i,t in enumerate(series) :
+        in_loc = i if t < p else in_loc
+        p = p if t > p else t
 
-        weights = weights / np.sum(weights)
+        tmud = (t / p) - 1
 
-        self.ventry[:] = 0
-        self.ventry[idx] = weights * props
+        out_loc = i if tmud > mud else out_loc
+        mud = tmud if tmud > mud else mud
 
-    def invest(self) :
-        history = []
-        index = self.time_series.index.values[200:]
-        time_series = self.time_series.loc[:,CODES]
-        volume_series = self.volume_series
-        props = self.standard_value
-        code_count = len(CODES)
+        if res[-1][0] < mud and (res[-1][1] != in_loc or res[-1][2] != out_loc) :
+            res.append([mud,in_loc,out_loc])
 
-        self.ventry = np.array([0.] * code_count)
-        self.position = np.array([0.] * code_count)
-        self.coins = np.array([0.] * code_count)
+    res = np.array(res)
 
-        evaluator_instance = [*map(lambda x : deepcopy(self.evaluator_instance), range(code_count))]
+    out_loc = int(res[-1][2])
+    in_loc = int(res[-1][1])
 
-        for idx,date in enumerate(index) :
-            stime_series = time_series.loc[:date,:]
-            svolume_series = volume_series.loc[:date,:]
-            nows = time_series.loc[date,:].values
+    return in_loc , out_loc
 
-            self.rebalance(props,stime_series)
+class vinfo :
+    def __init__(self,atrr,vdr,nl,nu) :
+        self.atrr = atrr
+        self.vdr = vdr
+        self.nl = nl
+        self.nu = nu
+        self.term = 0
 
-            def routine(ei,position,props,coins,code):
-                now = time_series.loc[date,code]
-                _position = position
-                _props = props
+def get_vol_max_point(time_series,volume_series,delta=10) :
+    net_upper = 1.1
+    net_lower = 97
+    vol_sig = 1.3
 
-                if position == 0:
-                    signal = ei.eval_buy_condition(stime_series,svolume_series,code,date)
-                else :
-                    signal = ei.eval_sell_condition(stime_series,svolume_series,code,date)
+    volumes = volume_series.values
+    index = time_series.index.values
 
-                if signal and position == 0 :
-                    invest_prop = props
+    series = time_series.values
+    i , o = get_max_up_point(series[delta:])
 
-                    if props <= 0 :
-                        return position,props,coins
+    in_date = index[i]
+    out_date = index[o]
 
-                    coins += invest_prop * 0.997 / now
+    #vdr = volumes[i-1] / volumes[i-10:i-1].mean()
+    vdr = 0
 
-                    _props -= invest_prop
-                    _position = 1
-                    print("{} Buy {} {} at {}".format(date,coins,code,now))
+    nu = series[o] / series[i] - 1
+    atr = ATR(time_series,delta)
+    nl = 0
 
-                elif signal and position == 1 :
+    return atr,nu,i,o
 
-                    if coins <= 0 :
-                        return position,props,coins
-
-                    _props += coins * now
-                    _position = 0
-                    print("{} Cell {} {} at {}".format(date,coins,code,now))
-                    coins = 0
-
-                return _position,_props,coins
-
-            for idx, code in enumerate(CODES) :
-                po,p,c = routine(evaluator_instance[idx],self.position[idx],self.ventry[idx],self.coins[idx],code)
-                self.position[idx] = po
-                self.ventry[idx] = p
-                self.coins[idx] = c
-
-            props = np.sum(self.ventry)
-
-            self.standard_value = props + np.sum(self.coins * nows)
-            history.append(self.standard_value)
-
-        return history
-
-    def invest_single_coin(self,code) :
-        index = self.time_series.index.values[200:]
-        time_series = self.time_series
-        volume_series = self.volume_series
-
-        for idx,date in enumerate(index) :
-            stime_series = time_series.loc[:date,:]
-            svolume_series = volume_series.loc[:date,:]
-
-            now = time_series.loc[date,code]
-            res = -1
-
-            if self.position == 0 :
-                signal = evaluator_instance.eval_buy_condition(stime_series,svolume_series,code,date)
-
-            else :
-                signal = evaluator_instance.eval_sell_condition(stime_series,svolume_series,code,date)
-
-            if signal and self.position == 0 :
-                #invest_prop = k_control(self.standard_value,code,stime_series,svolume_series,date)
-                invest_prop = self.standard_value
-
-                if invest_prop < 100 :
-                    continue
-
-                self.coin = invest_prop * 0.997 / now
-                self.standard_value -= invest_prop
-                self.position = 1
-
-                print("{} Buy {} coins at {}".format(date,self.coin,now))
-
-            elif signal and self.position == 1 :
-                self.standard_value += self.coin * now
-                self.position = 0
-                print("{} Cell {} coins at {}".format(date,self.coin,now))
-                self.coin = 0
-
-            eval = now * self.coin + self.standard_value
-            self.history.append(eval)
-
-        return np.array(self.history)
+def insert_signals(con,name,sig) :
+    sig.to_sql(con=con,name=name,index_label="time",if_exists="append")
 
 if __name__ == "__main__" :
     strat = sys.argv[1]
@@ -177,6 +104,8 @@ if __name__ == "__main__" :
     simulator_instance = simulator(time_series.loc[:,CODES],volume_series,evaluator_instance)
 
     history = simulator_instance.invest() if bit_code is None else simulator_instance.invest_single_coin(bit_code)
+    #insert_signals(CONNECTION,"standard_irina",history)
+    history = history.values
 
     print(history[-1])
     mdd = MDD(history)
@@ -193,7 +122,6 @@ if __name__ == "__main__" :
     stan = np.cumprod(stan,axis=0)
     stan *= 1000
     c = time_series.columns.values
-
 
     #ax.plot(x,stan[:,0],label=c[0])
     #ax.plot(x,stan[:,1],label=c[1])

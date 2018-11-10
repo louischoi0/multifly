@@ -29,11 +29,38 @@ def MOVEV_CLOSE(time_series,delta) :
 
 def ATR(time_series,delta) :
     series = time_series.iloc[-delta:]
-    atrm = np.array([*map(lambda x : series.iloc[-delta+x]/ series.iloc[-delta+x-1], range(1,delta))])
+    atrm = np.array([*map(lambda x : series.iloc[-delta+x] / series.iloc[-delta+x-1], range(1,delta))])
     return atrm.mean(axis=0)
 
+volDash_config = {
+    "delta" : 10,
+    "time_cut" : 96,
+    "net_upper" : 1.12,
+    "net_lower" : 0.97
+}
+
+def sub_net(series) :
+    return series.iloc[-1] / series.iloc[0]
+
+def sub_std(series) :
+    return series.std()
+
+def functor(series,sub,arrays) :
+    inputs = [*map(lambda x : series.iloc[-x,:], arrays)]
+    return [*map(lambda x : sub(x), inputs)]
+
+def inject_node_values(stime,svolume,deltas) :
+    retuns = functor(stime,sub_net,deltas)
+    net_stds = functor(stime,sub_std,deltas)
+    vol_stds = functor(svolume,sub_std,deltas)
+
+    returns.extends(net_stds)
+    returns.extends(vol_stds)
+
+    return np.array(returns)
+
 class volDash :
-    def __init__(self,time_series,volume_series) :
+    def __init__(self,time_series,volume_series,code) :
         self.time_series = time_series
         self.volume_series = volume_series
         self.delta = 10
@@ -43,32 +70,66 @@ class volDash :
         self.volume_delta = 10
 
         self.net_upper = 1.12
-        self.net_lower = 0.96
+        self.net_lower = 0.97
 
-    def eval_buy_condition(self,stime_series,volume_series,code,date) :
-        time_series = stime_series.loc[:,code]
-        volume_series = volume_series.loc[:,code]
+        self.loss = 0
+        self.code = code
+        self.position = 0
+
+    def set_weights_nodes(self,nodes) :
+        self.wnodes = nodes
+
+    def eval_condition(self,stime_series,volume_series,date,puts) :
+        if self.position == 0 :
+            return self.eval_buy_condition(stime_series,volume_series,date,puts)
+        elif self.position == 1:
+            return self.eval_sell_condition(stime_series,volume_series,date)
+
+    def eval_buy_condition(self,time_series,volume_series,date,puts) :
+
+        if puts <= 0 :
+            return False, ""
 
         atr = ATR(time_series,self.delta)
         now = time_series.iloc[-1]
         before = time_series.iloc[-2]
 
+        #surplus = inject_node_values(time_series,volume_series,[5,10,20])
+
         vol_diff = volume_series.iloc[-self.delta:].mean() / volume_series.iloc[-self.delta]
-        signal = now > before + 0.5 * atr and vol_diff > 1.26
+        signal = now > before + 0.5 * atr and vol_diff > 1.23
 
         if signal :
             self.buy_time = datetime.strptime(date,"%Y-%m-%d-%H-%M")
             self.buy_price = now
+            self.position = 1
 
-        return signal
+        return signal, "buy"
 
-    def eval_sell_condition(self,time_series,volume_series,code,date) :
+    def eval_sell_condition(self,time_series,volume_series,date) :
         now_time = datetime.strptime(date,"%Y-%m-%d-%H-%M")
         diff = now_time - self.buy_time
-        now = time_series.iloc[-1].loc[code]
+        now = time_series.iloc[-1]
 
         signal = ((diff.days * 24) + diff.seconds / 3600 ) > self.time_cut or now > self.buy_price * self.net_upper or now < self.buy_price * self.net_lower
-        return  signal
+        self.sell_signal = signal
+
+        if signal :
+            self.position = 0
+
+            if now < self.buy_price:
+                self.loss += 1
+            else :
+                self.loss = 0 if self.loss == 0 else self.loss - 1
+
+        return signal, "sell"
+
+    def get_loss (self,buy_time) :
+        stime_series = self.time_series.loc[buy_time:]
+        volume_series = self.volume_series.loc[buy_time:]
+
+
+
 
 def k_control(props,code,time_series,volume_series,date) :
     b = time_series.iloc[-1,:].loc[code]
